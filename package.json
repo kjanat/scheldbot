@@ -1,0 +1,16 @@
+{
+  "name": "scheldbot",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "bun build src/index.ts --target node --outfile dist/index.mjs",
+    "lint": "bunx --bun tsc --noEmit"
+  },
+  "devDependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.0",
+    "openai": "^4.85.0",
+    "typescript": "^5.8.0"
+  }
+}

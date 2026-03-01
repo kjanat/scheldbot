@@ -1,0 +1,27 @@
+name: "Scheldbot"
+description: "Code review bot die je uitscheldt in het Nederlands"
+author: "kjanat"
+
+inputs:
+  github-token:
+    description: "GitHub token for API access"
+    required: true
+  openai-api-key:
+    description: "OpenAI API key for LLM review"
+    required: true
+  intensity:
+    description: "Scheld-intensiteit: low, medium, high, kanker"
+    required: false
+    default: "medium"
+  model:
+    description: "OpenAI model to use"
+    required: false
+    default: "gpt-4o-mini"
+  language:
+    description: "Review language"
+    required: false
+    default: "nl"
+
+runs:
+  using: "node20"
+  main: "dist/index.mjs"
