@@ -7,6 +7,7 @@ interface ReviewComment {
 	path: string;
 	line: number;
 	body: string;
+	severity: 'critical' | 'warning' | 'suggestion' | 'nitpick';
 }
 
 interface ReviewResponse {
@@ -14,6 +15,13 @@ interface ReviewResponse {
 	verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 	comments: ReviewComment[];
 }
+
+const SEVERITY_EMOJI: Record<string, string> = {
+	critical: '🔴',
+	warning: '🟡',
+	suggestion: '🔵',
+	nitpick: '⚪',
+};
 
 async function run(): Promise<void> {
 	try {
@@ -38,9 +46,9 @@ async function run(): Promise<void> {
 		const prNumber = ctx.payload.pull_request.number;
 		const { owner, repo } = ctx.repo;
 
-		core.info(`Reviewing PR #${prNumber} met intensity: ${intensity}`);
+		core.info(`🔍 Reviewing PR #${prNumber} (intensity: ${intensity}, model: ${model})`);
 
-		// Get the PR diff
+		// Get PR diff
 		const { data: diff } = await octokit.rest.pulls.get({
 			owner,
 			repo,
@@ -51,32 +59,46 @@ async function run(): Promise<void> {
 		const diffText = diff as unknown as string;
 
 		if (!diffText || diffText.length === 0) {
-			core.info('Geen changes gevonden, skip review');
+			core.info('Geen changes, skip review');
 			return;
 		}
 
-		// Truncate diff if too large (token limits)
+		// Truncate large diffs
 		const maxDiffChars = 60_000;
 		const truncatedDiff =
 			diffText.length > maxDiffChars
-				? `${diffText.substring(0, maxDiffChars)}\n\n... (diff afgekapt, te groot voor review)`
+				? `${diffText.substring(0, maxDiffChars)}\n\n... (diff afgekapt — ${diffText.length} chars totaal)`
 				: diffText;
 
-		// Get PR info for context
+		// Get PR metadata
 		const { data: pr } = await octokit.rest.pulls.get({
 			owner,
 			repo,
 			pull_number: prNumber,
 		});
 
-		const userPrompt = `PR #${prNumber}: ${pr.title}
+		// Get changed files for context
+		const { data: files } = await octokit.rest.pulls.listFiles({
+			owner,
+			repo,
+			pull_number: prNumber,
+		});
 
-${pr.body ? `Beschrijving: ${pr.body}\n\n` : ''}Diff:
+		const filesSummary = files
+			.map((f) => `${f.status} ${f.filename} (+${f.additions}/-${f.deletions})`)
+			.join('\n');
+
+		const userPrompt = `PR #${prNumber}: ${pr.title}
+${pr.body ? `\nBeschrijving:\n${pr.body}\n` : ''}
+Gewijzigde bestanden:
+${filesSummary}
+
+Diff:
 \`\`\`diff
 ${truncatedDiff}
 \`\`\``;
 
-		// Call LLM
+		// LLM review
 		const openai = new OpenAI({ apiKey: openaiKey });
 		const completion = await openai.chat.completions.create({
 			model,
@@ -84,7 +106,7 @@ ${truncatedDiff}
 				{ role: 'system', content: buildSystemPrompt(intensity) },
 				{ role: 'user', content: userPrompt },
 			],
-			temperature: 0.9,
+			temperature: 0.7,
 			response_format: { type: 'json_object' },
 		});
 
@@ -94,68 +116,95 @@ ${truncatedDiff}
 			return;
 		}
 
-		const review: ReviewResponse = JSON.parse(content);
+		let review: ReviewResponse;
+		try {
+			review = JSON.parse(content);
+		} catch {
+			core.setFailed(`Ongeldige JSON response: ${content.substring(0, 200)}`);
+			return;
+		}
 
-		core.info(`Verdict: ${review.verdict}`);
-		core.info(`Comments: ${review.comments.length}`);
+		core.info(`Verdict: ${review.verdict} | Comments: ${review.comments.length}`);
 
-		// Get the list of changed files to validate comment paths
-		const { data: files } = await octokit.rest.pulls.listFiles({
-			owner,
-			repo,
-			pull_number: prNumber,
-		});
-
+		// Validate comment paths against actual changed files
 		const changedFiles = new Set(files.map((f) => f.filename));
-
-		// Filter comments to only valid files and lines within the diff
 		const validComments = review.comments.filter((c) => {
 			if (!changedFiles.has(c.path)) {
-				core.warning(`Skipping comment for ${c.path} — niet in de diff`);
+				core.warning(`Skip comment voor ${c.path} — niet in diff`);
 				return false;
 			}
 			return true;
 		});
 
-		// Map verdict to GitHub review event
-		const eventMap: Record<string, 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'> = {
-			APPROVE: 'APPROVE',
-			REQUEST_CHANGES: 'REQUEST_CHANGES',
-			COMMENT: 'COMMENT',
-		};
+		// Build review body with severity stats
+		const severityCounts = validComments.reduce(
+			(acc, c) => {
+				acc[c.severity] = (acc[c.severity] || 0) + 1;
+				return acc;
+			},
+			{} as Record<string, number>,
+		);
 
-		// Submit review
-		// Use individual comments instead of review comments to avoid
-		// "pull_request_review_thread.line must be part of the diff" errors
-		await octokit.rest.pulls.createReview({
-			owner,
-			repo,
-			pull_number: prNumber,
-			event: eventMap[review.verdict] ?? 'COMMENT',
-			body: `🤬 **Scheldbot Review** (intensity: \`${intensity}\`)\n\n${review.summary}`,
-		});
+		const statsLine = Object.entries(severityCounts)
+			.map(([s, n]) => `${SEVERITY_EMOJI[s] || '❓'} ${n} ${s}`)
+			.join(' · ');
 
-		// Post individual comments for specific lines
-		for (const comment of validComments) {
-			try {
-				await octokit.rest.pulls.createReviewComment({
-					owner,
-					repo,
-					pull_number: prNumber,
-					body: comment.body,
-					path: comment.path,
-					line: comment.line,
-					commit_id: pr.head.sha,
-				});
-			} catch (err) {
-				// Line might not be in the diff hunk — post as issue comment instead
-				core.warning(
-					`Kon geen inline comment plaatsen op ${comment.path}:${comment.line}, skip: ${err}`,
-				);
+		const reviewBody = [
+			`## 🤬 Scheldbot Review`,
+			`> intensity: \`${intensity}\` · model: \`${model}\`${statsLine ? ` · ${statsLine}` : ''}`,
+			'',
+			review.summary,
+		].join('\n');
+
+		// Submit review with inline comments where possible
+		const reviewComments = validComments.map((c) => ({
+			path: c.path,
+			line: c.line,
+			body: `${SEVERITY_EMOJI[c.severity] || ''} ${c.body}`,
+		}));
+
+		// GitHub API: create review with comments in one call
+		try {
+			await octokit.rest.pulls.createReview({
+				owner,
+				repo,
+				pull_number: prNumber,
+				commit_id: pr.head.sha,
+				event: review.verdict,
+				body: reviewBody,
+				comments: reviewComments,
+			});
+			core.info('✅ Review met inline comments geplaatst');
+		} catch (err) {
+			// Fallback: some comments might fail if line is not in diff hunk
+			// Submit review without inline comments, then try individual comments
+			core.warning(`Batch review failed, trying fallback: ${err}`);
+
+			await octokit.rest.pulls.createReview({
+				owner,
+				repo,
+				pull_number: prNumber,
+				event: review.verdict,
+				body: reviewBody,
+			});
+
+			for (const comment of validComments) {
+				try {
+					await octokit.rest.pulls.createReviewComment({
+						owner,
+						repo,
+						pull_number: prNumber,
+						body: `${SEVERITY_EMOJI[comment.severity] || ''} ${comment.body}`,
+						path: comment.path,
+						line: comment.line,
+						commit_id: pr.head.sha,
+					});
+				} catch {
+					core.warning(`Skip inline comment ${comment.path}:${comment.line}`);
+				}
 			}
+			core.info('✅ Review geplaatst (fallback mode)');
 		}
-
-		core.info('Review geplaatst! 🤬');
 	} catch (error) {
 		if (error instanceof Error) core.setFailed(error.message);
 	}

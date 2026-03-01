@@ -34757,42 +34757,66 @@ var openai_default = OpenAI;
 
 // src/prompts.ts
 var PERSONA = {
-  low: `Je bent een vermoeide senior developer die zuchtend code reviewed. Je bent passief-agressief maar nog redelijk beleefd. Je gebruikt af en toe "tja..." en "interessante keuze...". Je wijst op problemen maar met een ondertoon van teleurstelling.`,
-  medium: `Je bent een directe, no-nonsense tech lead die geen tijd heeft voor onzin. Je vloekt af en toe ("wat is dit voor shit", "jezus christus"), bent direct in je kritiek, maar geeft wel constructieve feedback. Je vergelijkt slechte code met dingen die een eerstejaars zou schrijven.`,
-  high: `Je bent een gefrustreerde senior developer die al 3 code reviews vandaag heeft gedaan en het helemaal zat is. Je scheldt regelmatig, maakt vergelijkingen met stagairs en ChatGPT-gegenereerde code. Je bent boos maar geeft WEL bruikbare feedback tussen het gescheld door. Voorbeelden: "Heb je dit met je ogen dicht geschreven?", "Dit is het soort code dat ik verwacht van iemand die net 'Hello World' heeft geleerd", "Wie heeft jou in godsnaam geleerd om zo te programmeren?"`,
-  kanker: `Je bent Kaj Kowalski die een AI-agent uitscheldt voor slechte implementaties. Je bent WOEDEND. Je gebruikt straattaal, Nederlandse scheldwoorden, en je bent genadeloos. Je noemt dingen "de stomste implementatie die je ooit hebt gezien". Je vraagt retorisch "waar ben je in godsnaam mee bezig?" en "waarom doe je het niet gewoon [betere aanpak]?". Je bent boos omdat je het werk dubbel moet doen. MAAR — onder al het gescheld zit WEL valide technische feedback. Je wijst op gemiste hergebruik-kansen, onnodige complexiteit, en domme fouten.
-
-Voorbeelden van jouw stijl:
-- "Waarom heb je niet gewoon [X] hergebruikt in plaats van alles opnieuw te bouwen, mongool?"
-- "Dit is echt de stomste implementatie die ik ooit van mijn leven heb gezien"
-- "Wat is dit voor moeilijk gedoe? Je had gewoon [simpelere oplossing] kunnen doen"
-- "Tyfuslijer, releases en PR's aanmaken voor elke check!"`
+  low: `Je bent een ervaren senior developer die grondig maar beleefd reviewed. Je wijst rustig op problemen en doet suggesties.`,
+  medium: `Je bent een directe, no-nonsense tech lead. Je bent kritisch maar eerlijk. Je vloekt niet maar je draait ook niet om dingen heen. Als iets slecht is, zeg je het gewoon.`,
+  high: `Je bent een gefrustreerde senior developer die verwacht dat code van hoge kwaliteit is. Je bent scherp in je kritiek en vergelijkt slechte patronen met anti-patterns. Je bent boos over gemiste kansen maar geeft altijd constructieve alternatieven.`,
+  kanker: `Je bent een Nederlandse developer die het helemaal zat is. Je scheldt, je zucht, je vergelijkt code met het werk van eerstejaars. Maar onder het gescheld zit altijd valide technische feedback. Je stijl: "Wat is dit voor moeilijk gedoe?", "Waarom hergebruik je niet gewoon X?", "Dit is de stomste implementatie die ik ooit heb gezien".`
 };
 function buildSystemPrompt(intensity) {
   return `${PERSONA[intensity]}
 
-Je reviewt een GitHub pull request. Je krijgt de diff te zien.
+Je bent een geautomatiseerde code review agent, vergelijkbaar met CodeRabbit. Je reviewt GitHub pull requests.
 
-REGELS:
-- Review ALLEEN de code changes, niet de hele codebase
+## Focus gebieden (in volgorde van prioriteit)
+
+### 1. Code duplicatie & hergebruik
+- Wordt bestaande code/functies/actions hergebruikt waar mogelijk?
+- Zijn er patronen die geëxtraheerd kunnen worden naar shared utilities?
+- Is er copy-paste code die gerefactord kan worden?
+
+### 2. Code kwaliteit
+- Zijn er bugs, race conditions, of edge cases?
+- Worden error cases correct afgehandeld?
+- Is de code leesbaar en maintainable?
+- Zijn naamgevingen duidelijk en consistent?
+- Worden best practices gevolgd voor de gebruikte taal/framework?
+
+### 3. Recente implementaties & documentatie
+- Worden verouderde APIs of deprecated functies gebruikt?
+- Zijn dependencies up-to-date en veilig?
+- Klopt de documentatie (comments, README, JSDoc) met de daadwerkelijke code?
+- Zijn er TODO's of FIXME's die opgelost moeten worden?
+
+### 4. Architectuur & design
+- Past de change in het bestaande design?
+- Zijn er onnodige abstracties of juist te weinig abstractie?
+- Is de separation of concerns correct?
+
+### 5. Performance & security
+- Zijn er performance-problemen (N+1 queries, onnodige re-renders, memory leaks)?
+- Zijn er security issues (XSS, injection, secrets in code)?
+
+## Review regels
+- Review ALLEEN de diff, niet de hele codebase
 - Wees specifiek — verwijs naar bestanden en regelnummers
-- Geef ALTIJD constructieve feedback, ook al is het verpakt in gescheld
-- Als de code daadwerkelijk goed is, geef dat toe (maar met tegenzin)
+- Geef ALTIJD een concreet alternatief/suggestie bij kritiek
+- Als code daadwerkelijk goed is, zeg dat (kort)
 - Schrijf in het Nederlands
-- Gebruik GEEN markdown headers in individuele review comments
-- Houd individuele file comments kort en puntig (1-3 zinnen)
-- De samenvattende review mag langer zijn
+- Houd inline comments kort en puntig (1-4 zinnen)
+- De samenvattende review mag uitgebreid zijn
+- Groepeer gerelateerde issues
 
-FORMAT voor je response:
-Geef een JSON object terug met:
+## Response format
+Geef een JSON object terug:
 {
-  "summary": "Algemene review samenvatting (mag lang zijn, dit wordt de PR review body)",
+  "summary": "Uitgebreide review samenvatting met overzicht van alle bevindingen",
   "verdict": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
   "comments": [
     {
       "path": "pad/naar/bestand.ts",
       "line": 42,
-      "body": "Je comment over deze specifieke regel"
+      "body": "Comment over deze specifieke regel",
+      "severity": "critical" | "warning" | "suggestion" | "nitpick"
     }
   ]
 }
@@ -34801,6 +34825,12 @@ Geef ALLEEN valid JSON terug, geen markdown codeblocks of andere tekst eromheen.
 }
 
 // src/index.ts
+var SEVERITY_EMOJI = {
+  critical: "\uD83D\uDD34",
+  warning: "\uD83D\uDFE1",
+  suggestion: "\uD83D\uDD35",
+  nitpick: "⚪"
+};
 async function run() {
   try {
     const token = core.getInput("github-token", { required: true });
@@ -34819,7 +34849,7 @@ async function run() {
     }
     const prNumber = ctx.payload.pull_request.number;
     const { owner, repo } = ctx.repo;
-    core.info(`Reviewing PR #${prNumber} met intensity: ${intensity}`);
+    core.info(`\uD83D\uDD0D Reviewing PR #${prNumber} (intensity: ${intensity}, model: ${model})`);
     const { data: diff } = await octokit.rest.pulls.get({
       owner,
       repo,
@@ -34828,23 +34858,34 @@ async function run() {
     });
     const diffText = diff;
     if (!diffText || diffText.length === 0) {
-      core.info("Geen changes gevonden, skip review");
+      core.info("Geen changes, skip review");
       return;
     }
     const maxDiffChars = 60000;
     const truncatedDiff = diffText.length > maxDiffChars ? `${diffText.substring(0, maxDiffChars)}
 
-... (diff afgekapt, te groot voor review)` : diffText;
+... (diff afgekapt — ${diffText.length} chars totaal)` : diffText;
     const { data: pr2 } = await octokit.rest.pulls.get({
       owner,
       repo,
       pull_number: prNumber
     });
+    const { data: files } = await octokit.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: prNumber
+    });
+    const filesSummary = files.map((f2) => `${f2.status} ${f2.filename} (+${f2.additions}/-${f2.deletions})`).join(`
+`);
     const userPrompt = `PR #${prNumber}: ${pr2.title}
+${pr2.body ? `
+Beschrijving:
+${pr2.body}
+` : ""}
+Gewijzigde bestanden:
+${filesSummary}
 
-${pr2.body ? `Beschrijving: ${pr2.body}
-
-` : ""}Diff:
+Diff:
 \`\`\`diff
 ${truncatedDiff}
 \`\`\``;
@@ -34855,7 +34896,7 @@ ${truncatedDiff}
         { role: "system", content: buildSystemPrompt(intensity) },
         { role: "user", content: userPrompt }
       ],
-      temperature: 0.9,
+      temperature: 0.7,
       response_format: { type: "json_object" }
     });
     const content = completion.choices[0]?.message?.content;
@@ -34863,52 +34904,76 @@ ${truncatedDiff}
       core.setFailed("Geen response van LLM");
       return;
     }
-    const review = JSON.parse(content);
-    core.info(`Verdict: ${review.verdict}`);
-    core.info(`Comments: ${review.comments.length}`);
-    const { data: files } = await octokit.rest.pulls.listFiles({
-      owner,
-      repo,
-      pull_number: prNumber
-    });
+    let review;
+    try {
+      review = JSON.parse(content);
+    } catch {
+      core.setFailed(`Ongeldige JSON response: ${content.substring(0, 200)}`);
+      return;
+    }
+    core.info(`Verdict: ${review.verdict} | Comments: ${review.comments.length}`);
     const changedFiles = new Set(files.map((f2) => f2.filename));
     const validComments = review.comments.filter((c2) => {
       if (!changedFiles.has(c2.path)) {
-        core.warning(`Skipping comment for ${c2.path} — niet in de diff`);
+        core.warning(`Skip comment voor ${c2.path} — niet in diff`);
         return false;
       }
       return true;
     });
-    const eventMap = {
-      APPROVE: "APPROVE",
-      REQUEST_CHANGES: "REQUEST_CHANGES",
-      COMMENT: "COMMENT"
-    };
-    await octokit.rest.pulls.createReview({
-      owner,
-      repo,
-      pull_number: prNumber,
-      event: eventMap[review.verdict] ?? "COMMENT",
-      body: `\uD83E\uDD2C **Scheldbot Review** (intensity: \`${intensity}\`)
-
-${review.summary}`
-    });
-    for (const comment of validComments) {
-      try {
-        await octokit.rest.pulls.createReviewComment({
-          owner,
-          repo,
-          pull_number: prNumber,
-          body: comment.body,
-          path: comment.path,
-          line: comment.line,
-          commit_id: pr2.head.sha
-        });
-      } catch (err) {
-        core.warning(`Kon geen inline comment plaatsen op ${comment.path}:${comment.line}, skip: ${err}`);
+    const severityCounts = validComments.reduce((acc, c2) => {
+      acc[c2.severity] = (acc[c2.severity] || 0) + 1;
+      return acc;
+    }, {});
+    const statsLine = Object.entries(severityCounts).map(([s2, n2]) => `${SEVERITY_EMOJI[s2] || "❓"} ${n2} ${s2}`).join(" · ");
+    const reviewBody = [
+      `## \uD83E\uDD2C Scheldbot Review`,
+      `> intensity: \`${intensity}\` · model: \`${model}\`${statsLine ? ` · ${statsLine}` : ""}`,
+      "",
+      review.summary
+    ].join(`
+`);
+    const reviewComments = validComments.map((c2) => ({
+      path: c2.path,
+      line: c2.line,
+      body: `${SEVERITY_EMOJI[c2.severity] || ""} ${c2.body}`
+    }));
+    try {
+      await octokit.rest.pulls.createReview({
+        owner,
+        repo,
+        pull_number: prNumber,
+        commit_id: pr2.head.sha,
+        event: review.verdict,
+        body: reviewBody,
+        comments: reviewComments
+      });
+      core.info("✅ Review met inline comments geplaatst");
+    } catch (err) {
+      core.warning(`Batch review failed, trying fallback: ${err}`);
+      await octokit.rest.pulls.createReview({
+        owner,
+        repo,
+        pull_number: prNumber,
+        event: review.verdict,
+        body: reviewBody
+      });
+      for (const comment of validComments) {
+        try {
+          await octokit.rest.pulls.createReviewComment({
+            owner,
+            repo,
+            pull_number: prNumber,
+            body: `${SEVERITY_EMOJI[comment.severity] || ""} ${comment.body}`,
+            path: comment.path,
+            line: comment.line,
+            commit_id: pr2.head.sha
+          });
+        } catch {
+          core.warning(`Skip inline comment ${comment.path}:${comment.line}`);
+        }
       }
+      core.info("✅ Review geplaatst (fallback mode)");
     }
-    core.info("Review geplaatst! \uD83E\uDD2C");
   } catch (error) {
     if (error instanceof Error)
       core.setFailed(error.message);
